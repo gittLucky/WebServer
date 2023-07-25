@@ -75,6 +75,7 @@ enum HeadersState
 // 结构体声明
 struct mytimer;
 struct requestData;
+class MutexLockGuard;
 
 struct requestData
 {
@@ -82,6 +83,7 @@ private:
   int againTimes;    // Request Aborted次数
   std::string path;   // PATH="/"
   int fd;     // 客户端(服务器)fd
+  std::string IP;    // 客户端IP
   int epollfd;   // epollfd
   // content的内容用完就清
   std::string content;   // 读取的内容
@@ -103,7 +105,7 @@ private:
 
 public:
   requestData();
-  requestData(int _epollfd, int _fd, std::string _path);
+  requestData(int _epollfd, int _fd, std::string addr_IP, std::string _path);
   ~requestData();
   void addTimer(mytimer *mtimer);
   void reset();
@@ -134,5 +136,20 @@ struct mytimer
 struct timerCmp
 {
   bool operator()(const mytimer *a, const mytimer *b) const;
+};
+
+// RAII锁机制，使锁能够自动释放
+class MutexLockGuard
+{
+public:
+    explicit MutexLockGuard();
+    ~MutexLockGuard();
+
+private:
+    static pthread_mutex_t lock;
+
+private:
+    MutexLockGuard(const MutexLockGuard&);
+    MutexLockGuard& operator=(const MutexLockGuard&);
 };
 #endif

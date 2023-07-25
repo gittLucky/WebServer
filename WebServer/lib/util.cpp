@@ -1,9 +1,78 @@
 #include "util.h"
-#include <unistd.h>
-#include <fcntl.h>
-#include <signal.h>
-#include <errno.h>
-#include <string.h>
+#include "_cmpublic.h"
+
+bool TcpRead(const int sockfd, char *buffer, int *ibuflen, const int itimeout)
+{
+  if (sockfd == -1)
+    return false;
+
+  if (itimeout > 0)
+  {
+    fd_set tmpfd;
+
+    FD_ZERO(&tmpfd);
+    FD_SET(sockfd, &tmpfd);
+
+    struct timeval timeout;
+    timeout.tv_sec = itimeout;
+    timeout.tv_usec = 0;
+
+    int i;
+    if ((i = select(sockfd + 1, &tmpfd, 0, 0, &timeout)) <= 0)
+      return false;
+  }
+
+  (*ibuflen) = 0;
+
+  if (readn(sockfd, (void *)ibuflen, 4) == false)
+    return false;
+
+  (*ibuflen) = ntohl(*ibuflen); // 把网络字节序转换为主机字节序
+
+  if (readn(sockfd, buffer, (*ibuflen)) == false)
+    return false;
+
+  return true;
+}
+
+// 全局的发送函数，在多线程中使用
+bool TcpWrite(const int sockfd, const char *buffer, const int ibuflen)
+{
+  if (sockfd == -1)
+    return false;
+
+  fd_set tmpfd;
+
+  FD_ZERO(&tmpfd);
+  FD_SET(sockfd, &tmpfd);
+
+  struct timeval timeout;
+  timeout.tv_sec = 5;
+  timeout.tv_usec = 0;
+
+  if (select(sockfd + 1, 0, &tmpfd, 0, &timeout) <= 0)
+    return false;
+
+  int ilen = 0;
+
+  // 如果长度为0，就采用字符串的长度
+  if (ibuflen == 0)
+    ilen = strlen(buffer);
+  else
+    ilen = ibuflen;
+
+  int ilenn = htonl(ilen); // 转换为网络字节序
+
+  char strTBuffer[ilen + 4];
+  memset(strTBuffer, 0, sizeof(strTBuffer));
+  memcpy(strTBuffer, &ilenn, 4);
+  memcpy(strTBuffer + 4, buffer, ilen);
+
+  if (writen(sockfd, strTBuffer, ilen + 4) == false)
+    return false;
+
+  return true;
+}
 
 // 每次读取n字节
 ssize_t readn(int fd, void *buff, size_t n)

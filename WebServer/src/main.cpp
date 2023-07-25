@@ -2,18 +2,8 @@
 #include "epoll.h"
 #include "threadpool.h"
 #include "util.h"
-
-#include <sys/epoll.h>
-#include <queue>
-#include <sys/types.h>  // __uint32_t
-#include <sys/time.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <stdio.h>
-#include <string.h>
-#include <cstdlib>
-#include <iostream>
-#include <unistd.h>
+#include "_cmpublic.h"
+#include "log.h"
 
 using namespace std;
 
@@ -31,8 +21,11 @@ const int PORT = 8888;
 // 计时器超时时间(毫秒)
 const int TIMER_TIME_OUT = 500;
 
+extern CLogFile logfile;  // 服务程序的运行日志
 
-extern pthread_mutex_t qlock;
+
+// extern pthread_mutex_t qlock;
+// extern pthread_mutex_t log_lock;
 extern struct epoll_event* events;
 void acceptConnection(int listen_fd, int epoll_fd, const string &path);
 
@@ -101,16 +94,22 @@ void acceptConnection(int listen_fd, int epoll_fd, const string &path)
         getsockopt(accept_fd, SOL_SOCKET,  SO_KEEPALIVE, &optval, &len_optval);
         cout << "optval ==" << optval << endl;
         */
-        
-        // 设为非阻塞模式
-        int ret = setnonblocking(accept_fd);
-        if (ret < 0)
+        // 记录连接日志
+        char *str = inet_ntoa(client_addr.sin_addr);
+        // pthread_mutex_lock(&log_lock);
         {
-            perror("Set non block failed!");
-            return;
+            MutexLockGuard_LOG();
+            logfile.Write("客户端(%s)已连接。\n", str);
+            // 设为非阻塞模式
+            int ret = setnonblocking(accept_fd);
+            if (ret < 0) {
+                logfile.Write("Set accept non block failed!\n");
+                return;
+            }
         }
+        // pthread_mutex_unlock(&log_lock);
 
-        requestData *req_info = new requestData(epoll_fd, accept_fd, path);
+        requestData *req_info = new requestData(epoll_fd, accept_fd, string(str), path);
 
         // 文件描述符可以读，边缘触发(Edge Triggered)模式，保证一个socket连接在任一时刻只被一个线程处理
         __uint32_t _epo_event = EPOLLIN | EPOLLET | EPOLLONESHOT;
@@ -118,9 +117,10 @@ void acceptConnection(int listen_fd, int epoll_fd, const string &path)
         // 新增时间信息，为每一个新的连接添加一个过期时间
         mytimer *mtimer = new mytimer(req_info, TIMER_TIME_OUT);
         req_info->addTimer(mtimer);
-        pthread_mutex_lock(&qlock);
+        // pthread_mutex_lock(&qlock);
+        MutexLockGuard();
         myTimerQueue.push(mtimer);
-        pthread_mutex_unlock(&qlock);
+        // pthread_mutex_unlock(&qlock);
     }
 }
 // 分发处理函数
@@ -176,7 +176,8 @@ void handle_events(int epoll_fd, int listen_fd, struct epoll_event* events, int 
 */
 void handle_expired_event()
 {
-    pthread_mutex_lock(&qlock);
+    // pthread_mutex_lock(&qlock);
+    MutexLockGuard();
     while (!myTimerQueue.empty())
     {
         mytimer *ptimer_now = myTimerQueue.top();
@@ -195,38 +196,57 @@ void handle_expired_event()
             break;
         }
     }
-    pthread_mutex_unlock(&qlock);
+    // pthread_mutex_unlock(&qlock);
 }
 
 int main()
 {
     handle_for_sigpipe();
+    // 打开日志文件
+    if (logfile.Open("/home/student-4/wh/vscode-workspace/logfile.log", "a+") == false) {
+        printf("logfile.Open(%s) failed.\n", "/home/student-4/wh/vscode-workspace/logfile.log");
+        return -1;
+    }
     int epoll_fd = epoll_init();
     if (epoll_fd < 0)
     {
-        perror("epoll init failed");
+        logfile.Write("epoll init failed.\n");
         return 1;
     }
     threadpool_t *threadpool = threadpool_create(THREADPOOL_MIN_THREAD_NUM, THREADPOOL_MAX_THREAD_NUM, QUEUE_MAX_SIZE);
+    if (threadpool == NULL) {
+        logfile.Write("threadpool create failed\n");
+    }
     int listen_fd = socket_bind_listen(PORT);
     if (listen_fd < 0)
     {
-        perror("socket bind failed");
+        logfile.Write("socket bind failed\n");
         return 1;
     }
     if (setnonblocking(listen_fd) < 0)
     {
-        perror("set socket non block failed");
+        logfile.Write("set listen socket non block failed\n");
         return 1;
     }
     __uint32_t event = EPOLLIN | EPOLLET;
     requestData *req = new requestData();
     req->setFd(listen_fd);
-    epoll_add(epoll_fd, listen_fd, static_cast<void*>(req), event);
+    int ret = epoll_add(epoll_fd, listen_fd, static_cast<void*>(req), event);
+    if (ret < 0) {
+        logfile.Write("epoll add failed\n");
+        return 1;
+    }
     while (true)
     {
         int events_num = my_epoll_wait(epoll_fd, events, MAXEVENTS, -1);
-        //printf("%zu\n", myTimerQueue.size());        
+        //printf("%zu\n", myTimerQueue.size());
+        if (events_num < 0) {
+            MutexLockGuard_LOG();
+            // pthread_mutex_lock(&log_lock);
+            logfile.Write("epoll wait failed\n");
+            // pthread_mutex_unlock(&log_lock);
+            return 1;
+        }
         if (events_num == 0)
             continue;
         // 遍历events数组，根据监听种类及描述符类型分发操作

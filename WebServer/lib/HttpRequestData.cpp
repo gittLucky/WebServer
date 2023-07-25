@@ -1,15 +1,8 @@
 #include "HttpRequestData.h"
 #include "util.h"
 #include "epoll.h"
-#include <sys/epoll.h>
-#include <unistd.h>
-#include <sys/time.h> // gettimeofday
-#include <fcntl.h>    // open
-#include <pthread.h>
-#include <sys/stat.h> // stat函数
-#include <sys/mman.h> // mmap函数
-#include <queue>
-#include <string.h>
+#include "_cmpublic.h"
+#include "log.h"
 
 // #include <opencv/cv.h>
 // #include <opencv2/core/core.hpp>
@@ -18,10 +11,13 @@
 // using namespace cv;
 
 // test
-#include <iostream>
 using namespace std;
 
-pthread_mutex_t qlock = PTHREAD_MUTEX_INITIALIZER;
+// pthread_mutex_t qlock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t MutexLockGuard::lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;
+
+CLogFile logfile;
 
 // 静态成员类外初始化
 pthread_mutex_t MimeType::lock = PTHREAD_MUTEX_INITIALIZER;
@@ -63,22 +59,21 @@ priority_queue<mytimer *, deque<mytimer *>, timerCmp> myTimerQueue;
 
 // 监听描述符构造函数
 requestData::requestData() : now_read_pos(0), state(STATE_PARSE_URI), h_state(h_start),
-                             keep_alive(false), againTimes(0), timer(NULL)
+                             keep_alive(true), againTimes(0), timer(NULL)
 {
     cout << "requestData constructed !" << endl;
 }
 
 // 连接描述符构造函数
-requestData::requestData(int _epollfd, int _fd, std::string _path) : now_read_pos(0), state(STATE_PARSE_URI), h_state(h_start),
-                                                                     keep_alive(false), againTimes(0), timer(NULL),
-                                                                     path(_path), fd(_fd), epollfd(_epollfd)
-{
-}
+requestData::requestData(int _epollfd, int _fd, std::string addr_IP, std::string _path) : now_read_pos(0), state(STATE_PARSE_URI), h_state(h_start),
+                                                                     keep_alive(true), againTimes(0), timer(NULL),
+                                                                     path(_path), fd(_fd), IP(addr_IP), epollfd(_epollfd)
+{}
 
 // 析构函数
 requestData::~requestData()
 {
-    cout << "~requestData()" << endl;
+    // cout << "~requestData()" << endl;
     struct epoll_event ev;
     // 超时的一定都是读请求，没有"被动"写。
     ev.events = EPOLLIN | EPOLLET | EPOLLONESHOT;
@@ -118,6 +113,7 @@ void requestData::reset()
     content.clear();
     file_name.clear();
     path.clear();
+    IP.clear();
     now_read_pos = 0;
     state = STATE_PARSE_URI;
     h_state = h_start;
@@ -146,7 +142,7 @@ void requestData::handleRequest()
         int read_num = readn(fd, buff, MAX_BUFF);
         if (read_num < 0)
         {
-            perror("1");
+            // perror("1");
             isError = true;
             break;
         }
@@ -179,7 +175,7 @@ void requestData::handleRequest()
             }
             else if (flag == PARSE_URI_ERROR)
             {
-                perror("2");
+                // perror("2");
                 isError = true;
                 break;
             }
@@ -193,7 +189,7 @@ void requestData::handleRequest()
             }
             else if (flag == PARSE_HEADER_ERROR)
             {
-                perror("3");
+                // perror("3");
                 isError = true;
                 break;
             }
@@ -249,6 +245,9 @@ void requestData::handleRequest()
 
     if (isError)
     {
+        pthread_mutex_lock(&log_lock);
+        logfile.Write("客户端(%s)HTTP解析错误!\n", IP.c_str());
+        pthread_mutex_unlock(&log_lock);
         delete this;
         return;
     }
@@ -257,7 +256,10 @@ void requestData::handleRequest()
     {
         if (keep_alive)
         {
-            printf("ok\n");
+            // printf("ok\n");
+            pthread_mutex_lock(&log_lock);
+            logfile.Write("客户端(%s)HTTP解析成功!\n", IP.c_str());
+            pthread_mutex_unlock(&log_lock);
             this->reset();
         }
         else
@@ -270,17 +272,23 @@ void requestData::handleRequest()
     // 然后正在线程中进行的任务出错，double free错误
 
     // 新增时间信息
-    pthread_mutex_lock(&qlock);
+    // pthread_mutex_lock(&qlock);
     mytimer *mtimer = new mytimer(this, EPOLL_WAIT_TIME);
     timer = mtimer;
-    myTimerQueue.push(mtimer);
-    pthread_mutex_unlock(&qlock);
+    {
+        MutexLockGuard();
+        myTimerQueue.push(mtimer);
+    }
+    // pthread_mutex_unlock(&qlock);
 
     __uint32_t _epo_event = EPOLLIN | EPOLLET | EPOLLONESHOT;
     int ret = epoll_mod(epollfd, fd, static_cast<void *>(this), _epo_event);
     if (ret < 0)
     {
         // 返回错误处理
+        pthread_mutex_lock(&log_lock);
+        logfile.Write("epoll mod failed\n");
+        pthread_mutex_unlock(&log_lock);
         delete this;
         return;
     }
@@ -507,11 +515,17 @@ int requestData::analysisRequest()
         char header[MAX_BUFF];
         sprintf(header, "HTTP/1.1 %d %s\r\n", 200, "OK");
         // 如果收到的 Connection: keep-alive
-        if (headers.find("Connection") != headers.end() && headers["Connection"] == "keep-alive")
+        // 浏览器发送的HTTP报文默认是keep-alive，所以可能会省略Connection: keep-alive，所以构造函数默认keep-alive为true
+        if (headers.find("Connection") != headers.end())
         {
-            keep_alive = true;
-            sprintf(header, "%sConnection: keep-alive\r\n", header);
-            sprintf(header, "%sKeep-Alive: timeout=%d\r\n", header, EPOLL_WAIT_TIME);
+            if (headers["Connection"] == "keep-alive") {
+                sprintf(header, "%sConnection: keep-alive\r\n", header);
+                sprintf(header, "%sKeep-Alive: timeout=%d\r\n", header, EPOLL_WAIT_TIME);
+            }
+            else {
+                keep_alive = false;
+                sprintf(header, "%sConnection: close\r\n", header);
+            }
         }
         // cout << "content=" << content << endl;
         //  test char*
@@ -522,17 +536,17 @@ int requestData::analysisRequest()
         size_t send_len = (size_t)writen(fd, header, strlen(header));
         if (send_len != strlen(header))
         {
-            perror("Send header failed");
+            // perror("Send header failed");
             return ANALYSIS_ERROR;
         }
 
         send_len = (size_t)writen(fd, send_content, strlen(send_content));
         if (send_len != strlen(send_content))
         {
-            perror("Send content failed");
+            // perror("Send content failed");
             return ANALYSIS_ERROR;
         }
-        cout << "content size ==" << content.size() << endl;
+        // cout << "content size ==" << content.size() << endl;
         // 保存发送方数据到vector
         // vector<char> data(content.begin(), content.end());
         // // opencv函数：将vector中内容读到Mat矩阵中
@@ -545,11 +559,18 @@ int requestData::analysisRequest()
     {
         char header[MAX_BUFF];
         sprintf(header, "HTTP/1.1 %d %s\r\n", 200, "OK");
-        if (headers.find("Connection") != headers.end() && headers["Connection"] == "keep-alive")
+        // 如果收到的 Connection: keep-alive
+        // 浏览器发送的HTTP报文默认是keep-alive，所以可能会省略Connection: keep-alive，所以构造函数默认keep-alive为true
+        if (headers.find("Connection") != headers.end())
         {
-            keep_alive = true;
-            sprintf(header, "%sConnection: keep-alive\r\n", header);
-            sprintf(header, "%sKeep-Alive: timeout=%d\r\n", header, EPOLL_WAIT_TIME);
+            if (headers["Connection"] == "keep-alive") {
+                sprintf(header, "%sConnection: keep-alive\r\n", header);
+                sprintf(header, "%sKeep-Alive: timeout=%d\r\n", header, EPOLL_WAIT_TIME);
+            }
+            else {
+                keep_alive = false;
+                sprintf(header, "%sConnection: close\r\n", header);
+            }
         }
         int dot_pos = file_name.find('.');
         const char *filetype;
@@ -574,7 +595,7 @@ int requestData::analysisRequest()
         size_t send_len = (size_t)writen(fd, header, strlen(header));
         if (send_len != strlen(header))
         {
-            perror("Send header failed");
+            // perror("Send header failed");
             return ANALYSIS_ERROR;
         }
         // 打开文件，O_RDONLY只读打开
@@ -590,7 +611,7 @@ int requestData::analysisRequest()
         send_len = writen(fd, src_addr, sbuf.st_size);
         if (send_len != sbuf.st_size)
         {
-            perror("Send file failed");
+            // perror("Send file failed");
             return ANALYSIS_ERROR;
         }
         // 删除映射
@@ -635,10 +656,10 @@ mytimer::mytimer(requestData *_request_data, int timeout) : deleted(false), requ
 
 mytimer::~mytimer()
 {
-    cout << "~mytimer()" << endl;
+    // cout << "~mytimer()" << endl;
     if (request_data != NULL)
     {
-        cout << "request_data=" << request_data << endl;
+        // cout << "request_data=" << request_data << endl;
         delete request_data;
         request_data = NULL;
     }
@@ -694,4 +715,16 @@ size_t mytimer::getExpTime() const
 bool timerCmp::operator()(const mytimer *a, const mytimer *b) const
 {
     return a->getExpTime() > b->getExpTime();
+}
+
+// 在构造函数中构造锁
+MutexLockGuard::MutexLockGuard()
+{
+    pthread_mutex_lock(&lock);
+}
+
+// 在析构函数中释放锁
+MutexLockGuard::~MutexLockGuard()
+{
+    pthread_mutex_unlock(&lock);
 }

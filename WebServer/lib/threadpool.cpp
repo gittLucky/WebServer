@@ -1,11 +1,5 @@
 #include "threadpool.h"
-#include <stdlib.h>
-#include <unistd.h>
-#include <assert.h>
-#include <stdio.h>
-#include <string.h>
-#include <signal.h>
-#include <errno.h>
+#include "_cmpublic.h"
 
 #define DEFAULT_TIME 10        /*10s检测一次*/
 #define MIN_WAIT_TASK_NUM 10   /*如果queue_size > MIN_WAIT_TASK_NUM 添加新的线程到线程池*/
