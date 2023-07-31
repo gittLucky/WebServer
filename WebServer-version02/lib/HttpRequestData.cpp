@@ -13,11 +13,10 @@
 // test
 using namespace std;
 
+CLogFile logfile;
+
 // pthread_mutex_t qlock = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t MutexLockGuard::lock = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;
-
-CLogFile logfile;
 
 // 静态成员类外初始化
 pthread_mutex_t MimeType::lock = PTHREAD_MUTEX_INITIALIZER;
@@ -55,43 +54,52 @@ std::string MimeType::getMime(const std::string &suffix)
 }
 
 // 保存过期时间列表为小根堆
-priority_queue<mytimer *, deque<mytimer *>, timerCmp> myTimerQueue;
+priority_queue<shared_ptr<mytimer>, std::deque<shared_ptr<mytimer>>, timerCmp> myTimerQueue;
 
 // 监听描述符构造函数
-requestData::requestData() : now_read_pos(0), state(STATE_PARSE_URI), h_state(h_start),
-                             keep_alive(true), againTimes(0), timer(NULL)
-{
-    cout << "requestData constructed !" << endl;
-}
+requestData::requestData():
+    now_read_pos(0), 
+    state(STATE_PARSE_URI), 
+    h_state(h_start),
+    keep_alive(true), 
+    againTimes(0)
+{}
 
 // 连接描述符构造函数
-requestData::requestData(int _epollfd, int _fd, std::string addr_IP, std::string _path) : now_read_pos(0), state(STATE_PARSE_URI), h_state(h_start),
-                                                                     keep_alive(true), againTimes(0), timer(NULL),
-                                                                     path(_path), fd(_fd), IP(addr_IP), epollfd(_epollfd)
+requestData::requestData(int _epollfd, int _fd, std::string addr_IP, std::string _path): 
+    now_read_pos(0), 
+    state(STATE_PARSE_URI),
+    h_state(h_start),
+    keep_alive(true), 
+    againTimes(0), 
+    path(_path),
+    fd(_fd), 
+    IP(addr_IP), 
+    epollfd(_epollfd)
 {}
 
 // 析构函数
 requestData::~requestData()
 {
     // cout << "~requestData()" << endl;
-    struct epoll_event ev;
-    // 超时的一定都是读请求，没有"被动"写。
-    ev.events = EPOLLIN | EPOLLET | EPOLLONESHOT;
-    ev.data.ptr = (void *)this;
-    epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, &ev);
-    if (timer != NULL)
-    {
-        timer->clearReq();
-        timer = NULL;
-    }
+    // struct epoll_event ev;
+    // // 超时的一定都是读请求，没有"被动"写。
+    // ev.events = EPOLLIN | EPOLLET | EPOLLONESHOT;
+    // ev.data.ptr = (void *)this;
+    // epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, &ev);
+    // if (timer != NULL)
+    // {
+    //     timer->clearReq();
+    //     timer = NULL;
+    // }
     close(fd);
 }
 
 // 为requestData添加计时
-void requestData::addTimer(mytimer *mtimer)
+void requestData::addTimer(shared_ptr<mytimer> mtimer)
 {
-    if (timer == NULL)
-        timer = mtimer;
+    // if (timer == NULL)
+    timer = mtimer;
 }
 
 // 获取fd
@@ -113,20 +121,30 @@ void requestData::reset()
     content.clear();
     file_name.clear();
     path.clear();
-    IP.clear();
     now_read_pos = 0;
     state = STATE_PARSE_URI;
     h_state = h_start;
     headers.clear();
-    keep_alive = false;
+    keep_alive = true;
+    // weak_ptr：use_count()返回与weak_ptr共享的shared_ptr数量
+    // expired()若use_count()为0返回true，对象已死
+    // lock()若expired()为true返回一个空的shared_ptr，否则返回一个指向对象的shared_ptr
+    if (timer.lock())
+    {
+        shared_ptr<mytimer> my_timer(timer.lock());
+        my_timer->clearReq();
+        timer.reset();
+    }
 }
 
 void requestData::seperateTimer()
 {
-    if (timer)
+    if (timer.lock())
     {
-        timer->clearReq();
-        timer = NULL;
+        shared_ptr<mytimer> my_timer(timer.lock());
+        my_timer->clearReq();
+        // timer制空
+        timer.reset();
     }
 }
 
@@ -245,10 +263,10 @@ void requestData::handleRequest()
 
     if (isError)
     {
-        pthread_mutex_lock(&log_lock);
+        MutexLockGuard_LOG();
         logfile.Write("客户端(%s)HTTP解析错误!\n", IP.c_str());
-        pthread_mutex_unlock(&log_lock);
-        delete this;
+        // delete this;
+        Epoll::epoll_del(fd, EPOLLIN | EPOLLET | EPOLLONESHOT);
         return;
     }
     // 加入epoll继续
@@ -256,15 +274,14 @@ void requestData::handleRequest()
     {
         if (keep_alive)
         {
-            // printf("ok\n");
-            pthread_mutex_lock(&log_lock);
+            MutexLockGuard_LOG();
             logfile.Write("客户端(%s)HTTP解析成功!\n", IP.c_str());
-            pthread_mutex_unlock(&log_lock);
             this->reset();
         }
         else
         {
-            delete this;
+            // delete this;
+            Epoll::epoll_del(fd, EPOLLIN | EPOLLET | EPOLLONESHOT);
             return;
         }
     }
@@ -273,8 +290,10 @@ void requestData::handleRequest()
 
     // 新增时间信息
     // pthread_mutex_lock(&qlock);
-    mytimer *mtimer = new mytimer(this, EPOLL_WAIT_TIME);
-    timer = mtimer;
+    // 使用shared_from_this()函数，不是用this，因为这样会造成2个非共享的share_ptr指向同一个对象，
+    // 未增加引用计数导对象被析构两次
+    shared_ptr<mytimer> mtimer(new mytimer(shared_from_this(), EPOLL_WAIT_TIME));
+    this->addTimer(mtimer);
     {
         MutexLockGuard();
         myTimerQueue.push(mtimer);
@@ -282,14 +301,13 @@ void requestData::handleRequest()
     // pthread_mutex_unlock(&qlock);
 
     __uint32_t _epo_event = EPOLLIN | EPOLLET | EPOLLONESHOT;
-    int ret = epoll_mod(epollfd, fd, static_cast<void *>(this), _epo_event);
+    int ret = Epoll::epoll_mod(fd, shared_from_this(), _epo_event);
     if (ret < 0)
     {
         // 返回错误处理
-        pthread_mutex_lock(&log_lock);
+        MutexLockGuard();
         logfile.Write("epoll mod failed\n");
-        pthread_mutex_unlock(&log_lock);
-        delete this;
+        // delete this;
         return;
     }
 }
@@ -631,7 +649,7 @@ void requestData::handleError(int fd, int err_num, string short_msg)
     body_buff += "<html><title>TKeed Error</title>";
     body_buff += "<body bgcolor=\"ffffff\">";
     body_buff += to_string(err_num) + short_msg;
-    body_buff += "<hr><em> LinYa's Web Server</em>\n</body></html>";
+    body_buff += "<hr><em> WH's Web Server</em>\n</body></html>";
 
     header_buff += "HTTP/1.1 " + to_string(err_num) + short_msg + "\r\n";
     header_buff += "Content-type: text/html\r\n";
@@ -645,7 +663,7 @@ void requestData::handleError(int fd, int err_num, string short_msg)
 }
 
 // 为每一个连接添加一个过期时间
-mytimer::mytimer(requestData *_request_data, int timeout) : deleted(false), request_data(_request_data)
+mytimer::mytimer(shared_ptr<requestData> _request_data, int timeout) : deleted(false), request_data(_request_data)
 {
     // cout << "mytimer()" << endl;
     struct timeval now;
@@ -659,9 +677,10 @@ mytimer::~mytimer()
     // cout << "~mytimer()" << endl;
     if (request_data != NULL)
     {
-        // cout << "request_data=" << request_data << endl;
-        delete request_data;
-        request_data = NULL;
+        // // cout << "request_data=" << request_data << endl;
+        // delete request_data;
+        // request_data = NULL;
+        Epoll::epoll_del(request_data->getFd(), EPOLLIN | EPOLLET | EPOLLONESHOT);
     }
 }
 
@@ -691,7 +710,8 @@ bool mytimer::isvalid()
 
 void mytimer::clearReq()
 {
-    request_data = NULL;
+    // 给智能指针制空值
+    request_data.reset();
     this->setDeleted();
 }
 
@@ -712,7 +732,7 @@ size_t mytimer::getExpTime() const
 }
 
 // 优先级队列的比较规则
-bool timerCmp::operator()(const mytimer *a, const mytimer *b) const
+bool timerCmp::operator()(shared_ptr<mytimer> &a, shared_ptr<mytimer> &b) const
 {
     return a->getExpTime() > b->getExpTime();
 }

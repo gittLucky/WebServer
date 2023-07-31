@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include <time.h>
+#include <pthread.h>
 // 以下是日志文件操作类
 // 日志文件操作类
 class CLogFile

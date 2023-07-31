@@ -4,6 +4,7 @@ set(SRCS1
     ../lib/HttpRequestData.cpp
     ../lib/threadpool.cpp
     ../lib/util.cpp
+    ../lib/log.cpp
 )
 
 add_executable(webServer ${SRCS1} main.cpp)
