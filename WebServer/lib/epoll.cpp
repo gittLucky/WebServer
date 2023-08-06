@@ -166,7 +166,7 @@ std::vector<std::shared_ptr<RequestData>> Epoll::getEventsRequest(int listen_fd,
         else
         {
             // 排除错误事件
-            if ((events[i].events & EPOLLERR) || (events[i].events & EPOLLHUP) || (!(events[i].events & EPOLLIN)))
+            if ((events[i].events & EPOLLERR) || (events[i].events & EPOLLHUP))
             {
                 // printf("error event\n");
                 auto fd_ite = fd2req.find(fd);
@@ -179,6 +179,11 @@ std::vector<std::shared_ptr<RequestData>> Epoll::getEventsRequest(int listen_fd,
             // 将请求任务加入到线程池中
             // 加入线程池之前将Timer和request分离
             SP_ReqData cur_req(fd2req[fd]);
+            // 如果为读取或者读取紧急数据事件
+            if ((events[i].events & EPOLLIN) || (events[i].events & EPOLLPRI))
+                cur_req->enableRead();
+            else
+                cur_req->enableWrite();
             // printf("cur_req.use_count=%d\n", cur_req.use_count());
             cur_req->seperateTimer();
             req_data.push_back(cur_req);

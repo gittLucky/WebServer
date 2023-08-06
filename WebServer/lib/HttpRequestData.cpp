@@ -50,6 +50,10 @@ RequestData::RequestData() : now_read_pos(0),
                              state(STATE_PARSE_URI),
                              h_state(h_start),
                              keep_alive(true),
+                             isAbleRead(true),
+                             isAbleWrite(false),
+                             isError(false),
+                             events(0),
                              againTimes(0)
 {
 }
@@ -63,7 +67,11 @@ RequestData::RequestData(int _epollfd, int _fd, std::string addr_IP, std::string
                                                                                           path(_path),
                                                                                           fd(_fd),
                                                                                           IP(addr_IP),
-                                                                                          epollfd(_epollfd)
+                                                                                          epollfd(_epollfd),
+                                                                                          isAbleRead(true),
+                                                                                          isAbleWrite(false),
+                                                                                          events(0),
+                                                                                          isError(false)
 {
 }
 
@@ -106,8 +114,8 @@ void RequestData::setFd(int _fd)
 // 重置requestData
 void RequestData::reset()
 {
+    inBuffer.clear();
     againTimes = 0;
-    content.clear();
     file_name.clear();
     path.clear();
     now_read_pos = 0;
@@ -138,19 +146,20 @@ void RequestData::seperateTimer()
 }
 
 // 事件处理函数
-void RequestData::handleRequest()
+void RequestData::handleRead()
 {
-    char buff[MAX_BUFF];
-    bool isError = false;
 
     // 此处循环保证边沿触发一次性读取完，continue来保证读取完
-    while (true)
+    // while (true)
+    do
     {
-        int read_num = readn(fd, buff, MAX_BUFF);
+        // readn函数保证一次全部读取完
+        int read_num = readn(fd, inBuffer);
         if (read_num < 0)
         {
             // perror("1");
             isError = true;
+            handleError(fd, 400, "Bad Request");
             break;
         }
         else if (read_num == 0)
@@ -170,33 +179,35 @@ void RequestData::handleRequest()
                 isError = true;
             break;
         }
-        std::string now_read(buff, buff + read_num);
-        content += now_read;
 
         if (state == STATE_PARSE_URI)
         {
             int flag = this->parse_URI();
             if (flag == PARSE_URI_AGAIN)
             {
-                continue;
+                // continue;
+                break;
             }
             else if (flag == PARSE_URI_ERROR)
             {
-                // perror("2");
+                handleError(fd, 400, "Bad Request");
                 isError = true;
                 break;
             }
+            else
+                state = STATE_PARSE_HEADERS;
         }
         if (state == STATE_PARSE_HEADERS)
         {
             int flag = this->parse_Headers();
             if (flag == PARSE_HEADER_AGAIN)
             {
-                continue;
+                // continue;
+                break;
             }
             else if (flag == PARSE_HEADER_ERROR)
             {
-                // perror("3");
+                handleError(fd, 400, "Bad Request");
                 isError = true;
                 break;
             }
@@ -220,12 +231,14 @@ void RequestData::handleRequest()
             }
             else
             {
+                handleError(fd, 400, "Bad Request: Lack of argument (Content-length)");
                 isError = true;
                 break;
             }
             // 数据部分本次未读完
-            if (content.size() < content_length)
-                continue;
+            if (inBuffer.size() < content_length)
+                // continue;
+                break;
             state = STATE_ANALYSIS;
         }
         if (state == STATE_ANALYSIS)
@@ -248,7 +261,7 @@ void RequestData::handleRequest()
                 break;
             }
         }
-    }
+    } while (false);
 
     if (isError)
     {
@@ -258,6 +271,8 @@ void RequestData::handleRequest()
         Epoll::epoll_del(fd);
         return;
     }
+    if (outBuffer.size() > 0)
+        events |= EPOLLOUT;
     // 加入epoll继续
     if (state == STATE_FINISH)
     {
@@ -266,41 +281,99 @@ void RequestData::handleRequest()
             MutexLockGuard_LOG();
             logfile.Write("客户端(%s)HTTP解析成功!\n", IP.c_str());
             this->reset();
+            events |= EPOLLIN;
         }
         else
         {
             // delete this;
-            Epoll::epoll_del(fd);
             return;
         }
     }
-    // 一定要先加时间信息，否则可能会出现刚加进去，下个in触发来了，然后分离失败后，又加入队列，最后超时被删，
-    // 然后正在线程中进行的任务出错，double free错误
-
-    // 新增时间信息
-    // pthread_mutex_lock(&qlock);
-    // 使用shared_from_this()函数，不是用this，因为这样会造成2个非共享的share_ptr指向同一个对象，
-    // 未增加引用计数导对象被析构两次
-    Epoll::add_timer(shared_from_this(), EPOLL_WAIT_TIME);
-    // pthread_mutex_unlock(&qlock);
-
-    __uint32_t _epo_event = EPOLLIN | EPOLLET | EPOLLONESHOT;
-    int ret = Epoll::epoll_mod(fd, shared_from_this(), _epo_event);
-    if (ret < 0)
+    // 从PARSE_HEADER_AGAIN或PARSE_URI_AGAIN或inBuffer.size() < content_length跳出
+    // 表示没有读到预期的内容，重新读
+    else
     {
-        // 返回错误处理
-        MutexLockGuard_LOG();
-        logfile.Write("epoll mod failed\n");
-        // delete this;
-        return;
+        events |= EPOLLIN;
+    }
+}
+
+void RequestData::handleWrite()
+{
+    if (!isError)
+    {
+        if (writen(fd, outBuffer) < 0)
+        {
+            // perror("writen");
+            events = 0;
+            isError = true;
+            Epoll::epoll_del(fd, (EPOLLOUT | EPOLLET | EPOLLONESHOT));
+        }
+        else if (outBuffer.size() > 0)
+            events |= EPOLLOUT;
+    }
+}
+
+void RequestData::handleConn()
+{
+    if (!isError)
+    {
+        if (events != 0)
+        {
+            // 一定要先加时间信息，否则可能会出现刚加进去，下个in触发来了，然后分离失败后，又加入队列，最后超时被删，然后正在线程中进行的任务出错，double free错误。
+            // 新增时间信息
+            int timeout = 2000;
+            if (keep_alive)
+                timeout = 5 * 60 * 1000; // 超时时间为5分钟
+            isAbleRead = false;
+            isAbleWrite = false;
+            // 新增时间信息
+            // pthread_mutex_lock(&qlock);
+            // 使用shared_from_this()函数，不是用this，因为这样会造成2个非共享的share_ptr指向同一个对象，
+            // 未增加引用计数导对象被析构两次
+            Epoll::add_timer(shared_from_this(), timeout);
+            if ((events & EPOLLIN) && (events & EPOLLOUT))
+            {
+                events = __uint32_t(0);
+                events |= EPOLLOUT;
+            }
+            events |= (EPOLLET | EPOLLONESHOT);
+            __uint32_t _events = events;
+            events = 0;
+            if (Epoll::epoll_mod(fd, shared_from_this(), _events) < 0)
+            {
+                // 返回错误处理
+                MutexLockGuard_LOG();
+                logfile.Write("epoll mod failed\n");
+            }
+        }
+        else if (keep_alive) // 正常处理完写
+        {
+            events |= (EPOLLIN | EPOLLET | EPOLLONESHOT);
+            int timeout = 5 * 60 * 1000;
+            isAbleRead = false;
+            isAbleWrite = false;
+            Epoll::add_timer(shared_from_this(), timeout);
+            __uint32_t _events = events;
+            events = 0;
+            if (Epoll::epoll_mod(fd, shared_from_this(), _events) < 0)
+            {
+                // 返回错误处理
+                MutexLockGuard_LOG();
+                logfile.Write("epoll mod failed\n");
+            }
+        }
+        else
+        {
+            Epoll::epoll_del(fd, (EPOLLOUT | EPOLLET | EPOLLONESHOT));
+        }
     }
 }
 
 // 解析URI：确定属性filename,HTTPversion,method
 int RequestData::parse_URI()
 {
-    // str引用content，改变str就是改变content
-    std::string &str = content;
+    // str引用inBuffer，改变str就是改变inBuffer
+    std::string &str = inBuffer;
     // 读到完整的请求行再开始解析请求
     int pos = str.find('\r', now_read_pos);
     // 没有找到说明此次读取请求头包含不完全
@@ -385,14 +458,13 @@ int RequestData::parse_URI()
                 return PARSE_URI_ERROR;
         }
     }
-    state = STATE_PARSE_HEADERS;
     return PARSE_URI_SUCCESS;
 }
 
 // 解析请求头
 int RequestData::parse_Headers()
 {
-    std::string &str = content;
+    std::string &str = inBuffer;
     int key_start = -1, key_end = -1, value_start = -1, value_end = -1;
     int now_read_line_begin = 0;
     bool notFinish = true;
@@ -513,43 +585,29 @@ int RequestData::analysisRequest()
 {
     if (method == METHOD_POST)
     {
-        // get content
-        char header[MAX_BUFF];
-        sprintf(header, "HTTP/1.1 %d %s\r\n", 200, "OK");
+        // get inBuffer
+        std::string header;
+        header += std::string("HTTP/1.1 200 OK\r\n");
         // 如果收到的 Connection: keep-alive
         // 浏览器发送的HTTP报文默认是keep-alive，所以可能会省略Connection: keep-alive，所以构造函数默认keep-alive为true
         if (headers.find("Connection") != headers.end())
         {
             if (headers["Connection"] == "keep-alive")
             {
-                sprintf(header, "%sConnection: keep-alive\r\n", header);
-                sprintf(header, "%sKeep-Alive: timeout=%d\r\n", header, EPOLL_WAIT_TIME);
+                header += "Connection: keep-alive\r\n";
+                header += "Keep-Alive: timeout=" + std::to_string(5 * 60 * 1000) + "\r\n";
             }
             else
             {
                 keep_alive = false;
-                sprintf(header, "%sConnection: close\r\n", header);
+                header += "Connection: close\r\n";
             }
         }
-        // cout << "content=" << content << endl;
-        // test char*
-        char *send_content = "I have receiced this.";
+        std::string send_content = "I have receiced this.";
 
-        sprintf(header, "%sContent-length: %zu\r\n", header, strlen(send_content));
-        sprintf(header, "%s\r\n", header);
-        size_t send_len = (size_t)writen(fd, header, strlen(header));
-        if (send_len != strlen(header))
-        {
-            // perror("Send header failed");
-            return ANALYSIS_ERROR;
-        }
+        header += "Content-length:" + std::to_string(send_content.size()) + "\r\n\r\n";
+        outBuffer += header + send_content;
 
-        send_len = (size_t)writen(fd, send_content, strlen(send_content));
-        if (send_len != strlen(send_content))
-        {
-            // perror("Send content failed");
-            return ANALYSIS_ERROR;
-        }
         // cout << "content size ==" << content.size() << endl;
         // 保存发送方数据到vector
         // vector<char> data(content.begin(), content.end());
@@ -557,53 +615,50 @@ int RequestData::analysisRequest()
         // Mat test = imdecode(data, CV_LOAD_IMAGE_ANYDEPTH | CV_LOAD_IMAGE_ANYCOLOR);
         // // 保存到指定的文件receive.bmp
         // imwrite("receive.bmp", test);
+        int length = stoi(headers["Content-length"]);
+        inBuffer = inBuffer.substr(length);
         return ANALYSIS_SUCCESS;
     }
     else if (method == METHOD_GET)
     {
-        char header[MAX_BUFF];
-        sprintf(header, "HTTP/1.1 %d %s\r\n", 200, "OK");
+        std::string header;
+        header += std::string("HTTP/1.1 200 OK\r\n");
         // 如果收到的 Connection: keep-alive
         // 浏览器发送的HTTP报文默认是keep-alive，所以可能会省略Connection: keep-alive，所以构造函数默认keep-alive为true
         if (headers.find("Connection") != headers.end())
         {
             if (headers["Connection"] == "keep-alive")
             {
-                sprintf(header, "%sConnection: keep-alive\r\n", header);
-                sprintf(header, "%sKeep-Alive: timeout=%d\r\n", header, EPOLL_WAIT_TIME);
+                header += "Connection: keep-alive\r\n";
+                header += "Keep-Alive: timeout=" + std::to_string(5 * 60 * 1000) + "\r\n";
             }
             else
             {
                 keep_alive = false;
-                sprintf(header, "%sConnection: close\r\n", header);
+                header += "Connection: close\r\n";
             }
         }
         int dot_pos = file_name.find('.');
-        const char *filetype;
+        std::string filetype;
         if (dot_pos < 0)
-            filetype = MimeType::getMime("default").c_str();
+            filetype = MimeType::getMime("default");
         else
-            filetype = MimeType::getMime(file_name.substr(dot_pos)).c_str();
+            filetype = MimeType::getMime(file_name.substr(dot_pos));
         // 此结构体描述文件的信息
         struct stat sbuf;
         // stat函数获取文件信息保存到sbuf中
         if (stat(file_name.c_str(), &sbuf) < 0)
         {
+            header.clear();
             handleError(fd, 404, "Not Found!");
             return ANALYSIS_ERROR;
         }
 
-        sprintf(header, "%sContent-type: %s\r\n", header, filetype);
-        // 通过Content-length返回文件大小
-        sprintf(header, "%sContent-length: %ld\r\n", header, sbuf.st_size);
-
-        sprintf(header, "%s\r\n", header);
-        size_t send_len = (size_t)writen(fd, header, strlen(header));
-        if (send_len != strlen(header))
-        {
-            // perror("Send header failed");
-            return ANALYSIS_ERROR;
-        }
+        header += "Content-type: " + filetype + "\r\n";
+        header += "Content-length: " + std::to_string(sbuf.st_size) + "\r\n";
+        // 头部结束
+        header += "\r\n";
+        outBuffer += header;
         // 打开文件，O_RDONLY只读打开
         int src_fd = open(file_name.c_str(), O_RDONLY, 0);
         // mmap函数类似于read与write，只不过减少了用户态到核心态的拷贝，直接映射到核心态
@@ -613,13 +668,7 @@ int RequestData::analysisRequest()
         char *src_addr = static_cast<char *>(mmap(NULL, sbuf.st_size, PROT_READ, MAP_PRIVATE, src_fd, 0));
         close(src_fd);
 
-        // 发送文件并校验完整性
-        send_len = writen(fd, src_addr, sbuf.st_size);
-        if (send_len != sbuf.st_size)
-        {
-            // perror("Send file failed");
-            return ANALYSIS_ERROR;
-        }
+        outBuffer += src_addr;
         // 删除映射
         munmap(src_addr, sbuf.st_size);
         return ANALYSIS_SUCCESS;
@@ -634,18 +683,45 @@ void RequestData::handleError(int fd, int err_num, std::string short_msg)
     short_msg = " " + short_msg;
     char send_buff[MAX_BUFF];
     std::string body_buff, header_buff;
-    body_buff += "<html><title>TKeed Error</title>";
+    body_buff += "<html><title>出错了！</title>";
     body_buff += "<body bgcolor=\"ffffff\">";
     body_buff += std::to_string(err_num) + short_msg;
-    body_buff += "WH's Web Server</em>\n</body></html>";
+    body_buff += "<hr><em> WH's Web Server</em>\n</body></html>";
 
     header_buff += "HTTP/1.1 " + std::to_string(err_num) + short_msg + "\r\n";
     header_buff += "Content-type: text/html\r\n";
     header_buff += "Connection: close\r\n";
     header_buff += "Content-length: " + std::to_string(body_buff.size()) + "\r\n";
     header_buff += "\r\n";
+    // 错误处理不考虑writen不完的情况
     sprintf(send_buff, "%s", header_buff.c_str());
     writen(fd, send_buff, strlen(send_buff));
     sprintf(send_buff, "%s", body_buff.c_str());
     writen(fd, send_buff, strlen(send_buff));
+}
+
+void RequestData::enableRead()
+{
+    isAbleRead = true;
+}
+
+void RequestData::enableWrite()
+{
+    isAbleWrite = true;
+}
+
+bool RequestData::canRead()
+{
+    return isAbleRead;
+}
+
+bool RequestData::canWrite()
+{
+    return isAbleWrite;
+}
+
+void RequestData::disableReadAndWrite()
+{
+    isAbleRead = false;
+    isAbleWrite = false;
 }

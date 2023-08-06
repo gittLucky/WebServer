@@ -76,7 +76,11 @@ int ThreadPool::threadpool_create(int _min_thr_num, int _max_thr_num, int _queue
 void myHandler(std::shared_ptr<void> req)
 {
     std::shared_ptr<RequestData> request = std::static_pointer_cast<RequestData>(req);
-    request->handleRequest();
+    if (request->canWrite())
+        request->handleWrite();
+    else if (request->canRead())
+        request->handleRead();
+    request->handleConn();
 }
 
 /* 向线程池中 添加一个任务，args传给function */

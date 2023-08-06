@@ -4,8 +4,8 @@
 #include "../base/nocopyable.hpp"
 #include "../base/mutexLock.hpp"
 #include <unistd.h>
-#include <memory>
 #include <queue>
+#include <memory>
 #include <deque>
 
 class RequestData;

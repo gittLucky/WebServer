@@ -4,6 +4,9 @@
 #include <string>
 #include <unordered_map>
 #include <memory>
+#include <sys/types.h>
+
+const int MAX_BUFF = 4096;
 
 // URI请求行
 const int STATE_PARSE_URI = 1;
@@ -15,9 +18,6 @@ const int STATE_RECV_BODY = 3;
 const int STATE_ANALYSIS = 4;
 // 完成
 const int STATE_FINISH = 5;
-
-// HTTP读取缓存大小
-const int MAX_BUFF = 4096;
 
 // 有请求出现但是读不到数据,可能是Request Aborted,
 // 或者来自网络的数据没有达到等原因,
@@ -43,9 +43,6 @@ const int METHOD_POST = 1;
 const int METHOD_GET = 2;
 const int HTTP_10 = 1;
 const int HTTP_11 = 2; // 浏览器发起请求后默认为1.1版本 所以Connection字段会省略
-
-// 计时器过期时间
-const int EPOLL_WAIT_TIME = 500;
 
 // 单例模式
 class MimeType
@@ -82,13 +79,15 @@ class TimerNode;
 class RequestData : public std::enable_shared_from_this<RequestData> // 自动添加成员函数shared_from_this
 {
 private:
-  int againTimes;   // Request Aborted次数
-  std::string path; // PATH="/"
-  int fd;           // 客户端(服务器)fd
-  std::string IP;   // 客户端IP
-  int epollfd;      // epollfd
-  // content的内容用完就清
-  std::string content;                                  // 读取的内容
+  int againTimes;                                       // Request Aborted次数
+  std::string path;                                     // PATH="/"
+  int fd;                                               // 客户端(服务器)fd
+  std::string IP;                                       // 客户端IP
+  int epollfd;                                          // epollfd
+  std::string inBuffer;                                 // 读取内容缓存
+  std::string outBuffer;                                // 发送内容缓存
+  __uint32_t events;                                    // 事件变化
+  bool isError;                                         // 是否发生错误
   int method;                                           // 请求方式GET/POST
   int HTTPversion;                                      // HTTP版本
   std::string file_name;                                // 请求的文件路径
@@ -99,6 +98,9 @@ private:
   bool keep_alive;                                      // 长连接
   std::unordered_map<std::string, std::string> headers; // 请求头key-value
   std::weak_ptr<TimerNode> timer;
+
+  bool isAbleRead;
+  bool isAbleWrite;
 
 private:
   int parse_URI();
@@ -114,8 +116,16 @@ public:
   void seperateTimer();
   int getFd();
   void setFd(int _fd);
-  void handleRequest();
+  void handleRead();
+  void handleWrite();
   void handleError(int fd, int err_num, std::string short_msg);
+  void handleConn();
+
+  void enableRead();
+  void enableWrite();
+  bool canRead();
+  bool canWrite();
+  void disableReadAndWrite();
 };
 
 #endif
