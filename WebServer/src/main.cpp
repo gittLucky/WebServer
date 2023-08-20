@@ -1,6 +1,7 @@
 #include "HttpRequestData.h"
 #include "epoll.h"
 #include "threadpool.h"
+#include "connectionPool.h"
 #include "util.h"
 #include "_cmpublic.h"
 #include "log.h"
@@ -79,6 +80,11 @@ int main()
     if (ThreadPool::threadpool_create(THREADPOOL_MIN_THREAD_NUM, THREADPOOL_MAX_THREAD_NUM, QUEUE_MAX_SIZE) < 0)
     {
         logfile.Write("threadpool create failed\n");
+        return 1;
+    }
+    if(ConnectionPool::sqlConnectionPoolCreate() < 0)
+    {
+        logfile.Write("数据库连接失败！\n");
         return 1;
     }
     int listen_fd = socket_bind_listen(PORT);

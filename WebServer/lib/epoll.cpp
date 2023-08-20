@@ -101,7 +101,7 @@ void Epoll::acceptConnection(int listen_fd, int epoll_fd, const std::string path
 {
     struct sockaddr_in client_addr;
     memset(&client_addr, 0, sizeof(struct sockaddr_in));
-    socklen_t client_addr_len = 0;
+    socklen_t client_addr_len = sizeof(struct sockaddr_in);
     int accept_fd = 0;
     // 此处使用while循环是解决边沿触发问题，多个连接请求同时到达，epoll_wait只会通知一次，导致有的连接没有响应
     while ((accept_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_addr_len)) > 0)

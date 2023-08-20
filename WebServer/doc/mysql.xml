@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+    <mysql>
+        <ip>10.70.179.17</ip>
+        <port>0</port>
+        <username>root</username>
+        <password>193810</password>
+        <dbName>wh_0819_webserver</dbName>
+        <minSize>4</minSize>
+        <maxSize>100</maxSize>
+        <maxIdleTime>1000</maxIdleTime>
+        <shutdown>0</shutdown>
+    </mysql>
+</root>

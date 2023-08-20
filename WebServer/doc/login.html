@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>用户登录页面</title>
+    <link rel="stylesheet" href="../css/login.css">
+    <script type="text/javascript" src="../js/jquery-3.1.0.min.js" charset="utf-8"></script>
+    <script type="text/javascript" src="../js/login.js" charset="utf-8"></script>
+    <script type="text/javascript" src="../js/verify.js" charset="utf-8"></script>
+    <script type="text/javascript">
+        $(function () {
+            // 初始时刻隐藏手机号验证码，显示用户名密码
+            $('.login-box').hide();
+            $('.login-box').first().show();
+            // 显示或隐藏登录方式
+            $('.login-method').each(function (i) {
+                $(this).click(function () {
+                    $('.login-box').hide();
+                    $('.login-box').eq(i).show();
+                })
+            })
+        })
+    </script>
+</head>
+
+<body>
+    <div class="login-bg">
+    </div>
+    <div class="login-box-wrapper">
+        <div class="login-title">
+            <span class='login-method'>用户名|密码</span>&nbsp;&nbsp;&nbsp;&nbsp;<span class='login-method'>手机号|验证码</span>
+        </div>
+        <div class="hr-line-div"></div>
+        <!-- 提交表单数据并且发送get请求 -->
+        <form action="" class="login-box" id="login-form">
+            <p class="paragraph">用户名：</p>
+            <p><input id="user" type="text" placeholder="请输入用户名" name="username"></p>
+            <p class="paragraph">密码：</p>
+            <p><input id="md5" type="password" placeholder="请输入密码" name="password"></p>
+            <p><input type="button" class="login-btn" value="立即登录" onclick="doPost('')">
+                <input type="button" class="login-btn" value="返回首页" onclick="goToHomePage()">
+            </p>
+        </form>
+        <form action="" class="login-box" id="login-form">
+            <p class="paragraph">手机号：</p>
+            <p><input id="phone1" type="text" placeholder="请输入手机号" name="phone"></p>
+            <p class="paragraph">验证码：</p>
+            <p><input type="text" placeholder="请输入验证码" name="checkcode" id="checkcode">
+                <input type="button" id="mybtn" value="获取验证码" onclick="sendMessage1()">
+            </p>
+            <p><input type="button" class="login-btn" value="立即登录" onclick="binding()">
+                <input type="button" class="login-btn" value="返回首页" onclick="goToHomePage()">
+            </p>
+        </form>
+    </div>
+
+</body>
+<script type="text/javascript">
+    function doPost(url) {
+        var password = $("#md5").val();
+        var username = $("#user").val();
+        if (username == "" || username == null) {
+            alert("用户名不能为空!");
+            return false;
+        } else if (password == "" || password == null) {
+            alert("密码不能为空!");
+            return false;
+        }
+        var md5password = $.md5(password);
+        console.log("没有加密之前是：" + password);
+        console.log("加密之后是：" + md5password);
+        // 向url发送post请求，不跳转页面，只是发送post请求
+        // 需要在function函数中处理响应结果
+        $.post(url, { 'username': username, 'password': md5password }, function (data) {
+            // 请求成功的回调函数
+            // 在这里可以处理返回的数据，并根据需要执行页面跳转逻辑
+            if (data.success) {
+                // 跳转到其他页面
+                window.location.href = '/home/student-4/wh/vscode-workspace/webServer/WebServer/doc/index.html';
+            } else {
+                // 处理失败情况
+                alert("用户名密码错误或不存在!");
+            }
+        });
+    }
+</script>
+
+</html>

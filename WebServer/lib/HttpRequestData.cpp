@@ -2,6 +2,8 @@
 #include "util.h"
 #include "epoll.h"
 #include "_cmpublic.h"
+#include "connectionPool.h"
+#include "sql.h"
 #include "log.h"
 
 // #include <opencv/cv.h>
@@ -27,6 +29,9 @@ void MimeType::init()
     mime[".gif"] = "image/gif";
     mime[".gz"] = "application/x-gzip";
     mime[".htm"] = "text/html";
+    mime[".css"] = "text/css";
+    mime[".js"] = "text/javascript";
+    mime[".xml"] = "text/xml";
     mime[".ico"] = "application/x-ico";
     mime[".jpg"] = "image/jpeg";
     mime[".png"] = "image/png";
@@ -148,7 +153,6 @@ void RequestData::seperateTimer()
 // 事件处理函数
 void RequestData::handleRead()
 {
-
     // 此处循环保证边沿触发一次性读取完，continue来保证读取完
     // while (true)
     do
@@ -225,13 +229,13 @@ void RequestData::handleRead()
         if (state == STATE_RECV_BODY)
         {
             int content_length = -1;
-            if (headers.find("Content-length") != headers.end())
+            if (headers.find("Content-Length") != headers.end())
             {
-                content_length = stoi(headers["Content-length"]);
+                content_length = stoi(headers["Content-Length"]);
             }
             else
             {
-                handleError(fd, 400, "Bad Request: Lack of argument (Content-length)");
+                handleError(fd, 400, "Bad Request: Lack of argument (Content-Length)");
                 isError = true;
                 break;
             }
@@ -405,7 +409,6 @@ int RequestData::parse_URI()
     {
         method = METHOD_GET;
     }
-    // printf("method = %d\n", method);
     // filename
     pos = request_line.find("/", pos);
     if (pos < 0)
@@ -428,9 +431,8 @@ int RequestData::parse_URI()
                     file_name = file_name.substr(0, __pos);
                 }
             }
-
             else
-                file_name = "../doc/index.html";
+                file_name = "../doc/hello.html";
         }
         pos = _pos;
     }
@@ -451,9 +453,13 @@ int RequestData::parse_URI()
         {
             std::string ver = request_line.substr(pos + 1, 3);
             if (ver == "1.0")
+            {
                 HTTPversion = HTTP_10;
+            }
             else if (ver == "1.1")
+            {
                 HTTPversion = HTTP_11;
+            }
             else
                 return PARSE_URI_ERROR;
         }
@@ -583,6 +589,27 @@ int RequestData::parse_Headers()
 // HTTP响应
 int RequestData::analysisRequest()
 {
+    // POST请求报文格式:
+    // POST /xmweb?host=mail.itcast.cn&_t=1542884567319 HTTP/1.1\r\n  // 请求资源路径与HTTP版本
+    // Host: mail.itcast.cn\r\n  // 服务器主机地址和端口，默认为80
+    // Connection: keep-alive\r\n  // 和服务器保持长连接
+    // Content-Length: 25
+    // Content-Type: application/x-www-form-urlencoded\r\n  // 告诉服务器请求的数据类型
+    // Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8\r\n  // 可接受的数据类型
+    // User-Agent: Chrome/69.0.3497.100\r\n
+    // \r\n(请求头信息后面还有一个单独的'\r\n'不能省略)
+    // username=hello&pass=hello  // 请求参数
+
+    // POST GET响应报文格式:
+    // HTTP/1.1 200 OK\r\n
+    // Server: Tengine\r\n   // 服务器名称
+    // Content-Type: text/html; charset=UTF-8\r\n  // 内容类型
+    // Transfer-Encoding: chunked\r\n // 发送给客户端内容不确定内容长度，发送结束的标记是0\r\n, Content-Length表示服务端确定发送给客户端的内容大小，但是二者只能用其一
+    // Connection: keep-alive\r\n  // 和客户端保持长连接
+    // Date: Fri, 23 Nov 2018 02:01:05 GMT\r\n  // 服务端响应时间
+    // \r\n(响应头信息后面还有一个单独的'\r\n'不能省略)
+    // <!DOCTYPE html><html lang=“en”> …</html>  // 响应给客户端的数据
+    
     if (method == METHOD_POST)
     {
         // get inBuffer
@@ -595,7 +622,7 @@ int RequestData::analysisRequest()
             if (headers["Connection"] == "keep-alive")
             {
                 header += "Connection: keep-alive\r\n";
-                header += "Keep-Alive: timeout=" + std::to_string(5 * 60 * 1000) + "\r\n";
+                header += "Keep-Alive: timeout=" + to_string(5 * 60 * 1000) + "\r\n";
             }
             else
             {
@@ -603,19 +630,63 @@ int RequestData::analysisRequest()
                 header += "Connection: close\r\n";
             }
         }
-        std::string send_content = "I have receiced this.";
-
-        header += "Content-length:" + std::to_string(send_content.size()) + "\r\n\r\n";
+        header += std::string("Content-Type: application/json; charset=UTF-8\r\n");
+        /*std::string send_content = "I have receiced this.";
+        header += "Content-Length:" + to_string(send_content.size()) + "\r\n\r\n";
         outBuffer += header + send_content;
+        cout << "content size ==" << content.size() << endl;
+        保存发送方数据到vector
+        vector<char> data(content.begin(), content.end());
+        // opencv函数：将vector中内容读到Mat矩阵中
+        Mat test = imdecode(data, CV_LOAD_IMAGE_ANYDEPTH | CV_LOAD_IMAGE_ANYCOLOR);
+        // 保存到指定的文件receive.bmp
+        imwrite("receive.bmp", test);*/
 
-        // cout << "content size ==" << content.size() << endl;
-        // 保存发送方数据到vector
-        // vector<char> data(content.begin(), content.end());
-        // // opencv函数：将vector中内容读到Mat矩阵中
-        // Mat test = imdecode(data, CV_LOAD_IMAGE_ANYDEPTH | CV_LOAD_IMAGE_ANYCOLOR);
-        // // 保存到指定的文件receive.bmp
-        // imwrite("receive.bmp", test);
-        int length = stoi(headers["Content-length"]);
+        // Content-Type: application/x-www-form-urlencoded 参数通过"&"拼接
+        // Content-Type: multipart/form-data 参数通过----拼接
+        // 将post请求数据保存到数据库
+        // 创建数据库连接池
+        shared_ptr<MysqlConn> conn = ConnectionPool::getConnection();
+        // 创建事务
+        conn->transaction();
+        // 获取键值
+        int index = inBuffer.find("&", 0);
+        std::string responseBody = "";
+        if (index >= 0)
+        {
+            std::string usernameStr = inBuffer.substr(0, index);
+            std::string username = usernameStr.substr(usernameStr.find('=') + 1);
+            std::string passwordStr = inBuffer.substr(index + 1);
+            std::string password = passwordStr.substr(passwordStr.find('=') + 1);
+            std::string querySql = "select * from user;";
+            if (conn->query(querySql))
+            {
+                conn->commit();
+                if (conn->getRes())
+                {
+                    // 用户名密码不正确或不存在，返回错误响应
+                    if (conn->getValue(1) != username || conn->getValue(2) != password)
+                    {
+                        // 创建响应体
+                        responseBody = "{\"success\": false, \"message\": \"Login error\"}";
+                        header += "Content-Length: " + std::to_string(responseBody.size()) + "\r\n";
+                    }
+                    else
+                    {
+                        // 创建响应体
+                        responseBody = "{\"success\": true, \"message\": \"Login successful\"}";
+                        header += "Content-Length: " + std::to_string(responseBody.size()) + "\r\n";
+                    }
+                }
+            }
+            else
+            {
+                conn->rollback();
+            }
+        }
+        header += "\r\n";
+        outBuffer += header + responseBody;
+        int length = stoi(headers["Content-Length"]);
         inBuffer = inBuffer.substr(length);
         return ANALYSIS_SUCCESS;
     }
@@ -630,7 +701,7 @@ int RequestData::analysisRequest()
             if (headers["Connection"] == "keep-alive")
             {
                 header += "Connection: keep-alive\r\n";
-                header += "Keep-Alive: timeout=" + std::to_string(5 * 60 * 1000) + "\r\n";
+                header += "Keep-Alive: timeout=" + to_string(5 * 60 * 1000) + "\r\n";
             }
             else
             {
@@ -654,8 +725,8 @@ int RequestData::analysisRequest()
             return ANALYSIS_ERROR;
         }
 
-        header += "Content-type: " + filetype + "\r\n";
-        header += "Content-length: " + std::to_string(sbuf.st_size) + "\r\n";
+        header += "Content-type: " + filetype + "; charset=UTF-8" + "\r\n";
+        header += "Content-Length: " + std::to_string(sbuf.st_size) + "\r\n";
         // 头部结束
         header += "\r\n";
         outBuffer += header;
@@ -691,7 +762,7 @@ void RequestData::handleError(int fd, int err_num, std::string short_msg)
     header_buff += "HTTP/1.1 " + std::to_string(err_num) + short_msg + "\r\n";
     header_buff += "Content-type: text/html\r\n";
     header_buff += "Connection: close\r\n";
-    header_buff += "Content-length: " + std::to_string(body_buff.size()) + "\r\n";
+    header_buff += "Content-Length: " + std::to_string(body_buff.size()) + "\r\n";
     header_buff += "\r\n";
     // 错误处理不考虑writen不完的情况
     sprintf(send_buff, "%s", header_buff.c_str());
